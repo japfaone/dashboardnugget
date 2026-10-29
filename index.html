@@ -260,12 +260,14 @@ const CFG = {
   // kapasitas teoritis line (bisa diedit di dashboard): cavity × cycle/menit × berat forming × (1+pickup)
   cap: { cavity:10, cycle:25, forming:14.45, pickup:36.15, yield:71 },
   sheetId: '1Trc9IJGQGj36Zs0RpHFh0eh21fEY9MJ_6Nk8FzXKPzo',
+  // Tab dibaca berdasarkan NAMA tab (name). gid hanya cadangan kalau nama tab diubah.
+  // Jangan ganti nama tab di Google Sheet tanpa mengubah 'name' di sini.
   tabs: {
     ss: { name:'START-STOP', gid:544413634, headers:2,
       cols:{ cycle:/(^|\s)cycle$/i, po:/\bno\.?\s*po\b/i, product:/nama produk/i, okp:/\bokp$/i, lot:/\blot$/i,
              start:/jam mulai|\bstart$/i, stop:/jam akhir|\bstop$/i, dur:/lama produksi|durasi/i },
       req:['okp','start','stop'] },
-    dt: { name:'DOWNTIME', gid:162833738, headers:4,
+    dt: { name:'DOWNTIME', gid:1598014535, headers:4,
       cols:{ date:/\bdate$|tanggal/i, okp:/\bokp$|\bno\.?\s*po\b/i, shift:/\bshift$/i, pic:/\bpic$/i, start:/\bstart$/i, stop:/\bstop$/i,
              hours:/in hours/i, mins:/in minutes/i, machine:/machine|mesin/i, act:/activity desc/i, cat:/activity cat/i,
              tcat:/time cat/i, code:/act code/i, ket:/keterangan/i },
@@ -327,15 +329,15 @@ const poShort = po => po ? String(po).slice(-4) : '–';
 
 /* ============ LOAD (gviz JSONP – jalan dari file lokal) ============ */
 let cbSeq = 0;
-function gviz(gid, headers){
+function gviz(ref, headers){ // ref = {sheet:'NAMA TAB'} atau {gid:123}
   return new Promise((resolve,reject)=>{
     const cb = '__gv'+(++cbSeq)+'_'+Date.now();
     const s = document.createElement('script');
-    const t = setTimeout(()=>{cleanup();reject(new Error('Timeout membaca gid '+gid));}, 20000);
+    const t = setTimeout(()=>{cleanup();reject(new Error('Timeout membaca tab '+(ref.sheet||'gid '+ref.gid)));}, 20000);
     function cleanup(){ clearTimeout(t); delete window[cb]; s.remove(); }
     window[cb] = res => { cleanup(); res && res.status==='error' ? reject(new Error((res.errors||[]).map(e=>e.detailed_message||e.message).join('; ')||'gviz error')) : resolve(res); };
     s.onerror = () => { cleanup(); reject(new Error('Gagal memuat sheet (cek akses "Anyone with the link")')); };
-    s.src = `https://docs.google.com/spreadsheets/d/${CFG.sheetId}/gviz/tq?tqx=out:json;responseHandler:${cb}&headers=${headers}&gid=${gid}&_=${Date.now()}`;
+    s.src = `https://docs.google.com/spreadsheets/d/${CFG.sheetId}/gviz/tq?tqx=out:json;responseHandler:${cb}&headers=${headers}&${ref.sheet!=null ? 'sheet='+encodeURIComponent(ref.sheet) : 'gid='+ref.gid}&_=${Date.now()}`;
     document.head.appendChild(s);
   });
 }
@@ -348,17 +350,23 @@ function mapCols(table, spec){
 async function loadTab(key){
   const T = CFG.tabs[key];
   const tries = [T.headers, ...[1,2,3,4,5,6,7,8].filter(h=>h!==T.headers)];
+  // Google mengembalikan TAB PERTAMA kalau nama/gid tidak ada, jadi hasil selalu dicek dari kolom wajib.
+  const refs = [{sheet:T.name}];
+  if (T.gid != null) refs.push({gid:T.gid});
   let last;
-  for (const h of tries){
-    const res = await gviz(T.gid, h);
-    const {idx, labels} = mapCols(res.table, T.cols);
-    if (T.req.every(k => idx[k] >= 0)){
-      const rows = res.table.rows.map(r => (r.c||[]).map(c => c ? c.v : null));
-      return {rows, idx, labels, headers:h};
+  for (const ref of refs){
+    for (const h of tries){
+      const res = await gviz(ref, h);
+      const {idx, labels} = mapCols(res.table, T.cols);
+      if (T.req.every(k => idx[k] >= 0)){
+        const rows = res.table.rows.map(r => (r.c||[]).map(c => c ? c.v : null));
+        return {rows, idx, labels, headers:h};
+      }
+      last = labels;
     }
-    last = labels;
   }
-  throw new Error(`Kolom wajib tidak ditemukan di tab ${T.name} (${T.req.join(', ')}). Header terbaca: ${(last||[]).filter(Boolean).join(' | ')}`);
+  const hdr = (last||[]).filter(Boolean).slice(0,8).join(' | ');
+  throw new Error(`Tab "${T.name}" tidak terbaca: kolom wajib (${T.req.join(', ')}) tidak ditemukan. Cek nama tab di Google Sheet persis "${T.name}". Header yang terbaca: ${hdr}${(last||[]).filter(Boolean).length>8?' …':''}`);
 }
 
 /* ============ MODEL ============ */
