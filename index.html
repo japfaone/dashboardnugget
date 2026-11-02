@@ -47,6 +47,10 @@ nav.pages{display:flex;gap:4px;background:var(--card);border:1px solid var(--lin
 nav.pages button{border:0;background:transparent;color:var(--ink2);font:600 13px inherit;font-family:inherit;padding:7px 16px;border-radius:999px;cursor:pointer}
 nav.pages button.on{background:var(--ink);color:var(--card)}
 nav.pages button:disabled{opacity:.45;cursor:not-allowed}
+nav.lines{display:flex;gap:4px;border-radius:999px;padding:4px;background:rgba(255,255,255,.1)}
+nav.lines button{border:0;background:transparent;color:rgba(255,255,255,.8);font:700 13px inherit;font-family:inherit;padding:7px 16px;border-radius:999px;cursor:pointer;letter-spacing:.02em}
+nav.lines button.on{background:#FFB23E;color:#3A2400}
+.capWarn{color:var(--warnInk);background:var(--warnBg);border:1px solid var(--warnLine);border-radius:8px;padding:2px 8px;font-weight:600}
 .spacer{flex:1}
 .meta{font-size:12px;color:var(--muted);text-align:right}
 .btn{border:1px solid var(--line);background:var(--card);color:var(--ink);font:600 13px inherit;font-family:inherit;padding:7px 14px;border-radius:10px;cursor:pointer}
@@ -148,6 +152,7 @@ body.exporting .expTag{display:block}
 <div class="wrap">
   <header class="top">
     <div class="brand">DASHBOARD NUGGET</div>
+    <nav class="lines" id="lineNav" aria-label="Produk"></nav>
     <nav class="pages">
       <button class="on" data-page="uptime">Uptime</button>
       <button data-page="oee">OEE</button>
@@ -157,11 +162,12 @@ body.exporting .expTag{display:block}
     <button class="btn" id="refresh">↻ Muat ulang</button>
   </header>
 
+  <div id="lineWarn" class="capWarn" style="display:none;margin:0 0 12px;padding:10px 14px;font-size:13px"></div>
   <div class="filterbar">
     <span class="lbl">Filter</span>
     <div class="seg multi cycSel" id="cycleSeg"></div>
     <div class="range" id="okpRange">OKP <select id="okpFrom" aria-label="OKP dari"></select> s/d <select id="okpTo" aria-label="OKP sampai"></select><button class="x" id="okpReset" title="Reset rentang OKP">✕</button></div>
-    <div class="ctl-input cap" title="Kapasitas teoritis line nugget">Kapasitas:
+    <div class="ctl-input cap" title="Kapasitas teoritis — disimpan terpisah untuk tiap produk">Kapasitas <b id="capLine"></b>:
       <label>Cavity <input id="capCavity" type="number" min="1" step="1"> pcs</label> ×
       <label>Cycle <input id="capCycle" type="number" min="1" step="1"> /mnt</label> ×
       <label>Forming <input id="capForming" type="number" min="0.01" step="0.01"> g</label> ×
@@ -257,8 +263,15 @@ body.exporting .expTag{display:block}
 <script>
 /* ============ KONFIGURASI ============ */
 const CFG = {
-  // kapasitas teoritis line (bisa diedit di dashboard): cavity × cycle/menit × berat forming × (1+pickup)
-  cap: { cavity:10, cycle:25, forming:14.45, pickup:36.15, yield:71 },
+  // Halaman per produk. Produk dikenali dari nama cycle (Cycle F-1 = Farmnest, Cycle K-1 = Katsu Eco);
+  // kalau cycle masih nama lama (Cycle 1), dikenali dari Nama Produk di START-STOP.
+  // cap = kapasitas teoritis default (bisa diedit di dashboard): cavity × cycle/menit × berat forming × (1+pickup) × yield
+  lines: [
+    { key:'F', slug:'farmnest',  name:'Farmnest',  cycRe:/(^|[\s-])F\s*-?\s*\d/i, prodRe:/FARMNEST/i,
+      cap:{ cavity:10, cycle:25, forming:14.45, pickup:36.15, yield:71 } },
+    { key:'K', slug:'katsu-eco', name:'Katsu Eco', cycRe:/(^|[\s-])K\s*-?\s*\d/i, prodRe:/KATSU/i,
+      cap:{ cavity:null, cycle:null, forming:null, pickup:null, yield:null } }   // belum ada angka default -> isi di dashboard
+  ],
   sheetId: '1Trc9IJGQGj36Zs0RpHFh0eh21fEY9MJ_6Nk8FzXKPzo',
   // Tab dibaca berdasarkan NAMA tab (name). gid hanya cadangan kalau nama tab diubah.
   // Jangan ganti nama tab di Google Sheet tanpa mengubah 'name' di sini.
@@ -371,10 +384,33 @@ async function loadTab(key){
 
 /* ============ MODEL ============ */
 let M = null;
-const S = { page:'uptime', oview:'po', basis:'std', target:NaN, view:'po', cycs:[], sel:null, okpFrom:'', okpTo:'', cap: {...CFG.cap}, theo: 0 };
-try{ const sv = JSON.parse(localStorage.getItem('nugget_cap')||'null'); if (sv) for (const k of ['cavity','cycle','forming','pickup','yield']) if (sv[k]>0) S.cap[k]=sv[k]; }catch(e){}
-function capCalc(){ const c=S.cap; const fg = c.forming*(1+c.pickup/100); const perMin = c.cavity*c.cycle*fg/1000; return { fg, perMin, perHour: perMin*60, nett: perMin*60*c.yield/100 }; }
-S.theo = capCalc().nett;
+let MALL = null;   // semua data; M = tampilan produk yang aktif
+const CAPK = ['cavity','cycle','forming','pickup','yield'];
+const LINE = k => CFG.lines.find(l=>l.key===k) || CFG.lines[0];
+function lineOf(cycle, product){
+  const c = String(cycle||''), pr = String(product||'');
+  for (const l of CFG.lines) if (l.cycRe.test(c)) return l.key;
+  for (const l of CFG.lines) if (l.prodRe.test(pr)) return l.key;
+  return '';
+}
+const S = { line:'F', page:'uptime', oview:'po', basis:'std', target:NaN, view:'po', cycs:[], sel:null, okpFrom:'', okpTo:'', caps:{}, cap:null, theo: 0 };
+for (const l of CFG.lines){
+  S.caps[l.key] = {...l.cap};
+  try{ const sv = JSON.parse(localStorage.getItem('nugget_cap_'+l.key) || (l.key==='F' ? localStorage.getItem('nugget_cap') : 'null') || 'null');
+       if (sv) for (const k of CAPK) if (sv[k]>0 || (k==='pickup' && sv[k]>=0)) S.caps[l.key][k]=sv[k]; }catch(e){}
+}
+const capReady = c => CAPK.every(k => k==='pickup' ? c[k]>=0 : c[k]>0);
+function capCalc(){ const c=S.cap; if (!capReady(c)) return { fg:0, perMin:0, perHour:0, nett:0, ok:false };
+  const fg = c.forming*(1+c.pickup/100); const perMin = c.cavity*c.cycle*fg/1000; return { fg, perMin, perHour: perMin*60, nett: perMin*60*c.yield/100, ok:true }; }
+function lineFromHash(){ const h = decodeURIComponent(location.hash.slice(1)).toLowerCase(); const l = CFG.lines.find(x=>x.slug===h || x.key.toLowerCase()===h); return l ? l.key : null; }
+S.line = lineFromHash() || (()=>{ try{ return localStorage.getItem('nugget_line'); }catch(e){ return null; } })() || 'F';
+if (!CFG.lines.some(l=>l.key===S.line)) S.line='F';
+S.cap = S.caps[S.line]; S.theo = capCalc().nett;
+const natSort = (a,b) => a.localeCompare(b, 'id', {numeric:true});
+function viewOf(A, key){
+  const pos = A.pos.filter(p=>p.line===key); const set = new Set(pos.map(p=>p.po));
+  return { pos, POs:A.POs, events: A.events.filter(e=>!e.po || set.has(e.po)), cycles:[...new Set(pos.map(p=>p.cycle).filter(Boolean))].sort(natSort), dq:A.dq };
+}
 
 function parseDT(v){ // datetime START-STOP: gviz Date(...) atau teks "Monday, 28 September 2026, 23:00"
   if (v==null || v==='') return null;
@@ -459,10 +495,9 @@ function build(ss, dt, ab, teco){
     else if (e.tcat!=='OFF'){ outside.n++; outside.h+=h; }
     events.push(e);
   }
-  for (const P of POs.values()){ P.run = Math.max(0, P.prod - P.OFF - P.PDT - P.UPDT - P.TRIAL); P.over = P.OFF+P.PDT+P.UPDT+P.TRIAL > P.prod + 1e-6; }
+  for (const P of POs.values()){ P.run = Math.max(0, P.prod - P.OFF - P.PDT - P.UPDT - P.TRIAL); P.over = P.OFF+P.PDT+P.UPDT+P.TRIAL > P.prod + 1e-6; P.line = lineOf(P.cycle, P.product); }
   const list = [...POs.values()].sort((a,b)=>(a.okp||a.start||0)-(b.okp||b.start||0) || a.po.localeCompare(b.po));
-  const cycles = [...new Set(list.map(p=>p.cycle).filter(Boolean))].sort();
-  return { pos:list, POs, events, cycles, dq:{ dup, outside, mapMode, abSkipped, ssNoPO, ssBad, overDT: list.filter(p=>p.over).map(p=>p.po) } };
+  return { pos:list, POs, events, dq:{ dup, outside, mapMode, abSkipped, ssNoPO, ssBad, overDT: list.filter(p=>p.over).map(p=>p.po), noLine: list.filter(p=>!p.line) } };
 }
 
 /* ============ AGREGASI UNTUK TAMPILAN ============ */
@@ -476,7 +511,7 @@ function scopePOs(){ return M.pos.filter(p => inCyc(p) && (!S.okpFrom || okpKey(
 const theoKg = run => run * (S.theo||0);
 const perf = (kg, run) => /* kg = total output */ (run>0 && S.theo>0 && isFinite(kg)) ? kg/theoKg(run) : NaN;
 function scopeLabel(){
-  const parts = [allCyc() ? 'Semua cycle' : S.cycs.map(cycName).join(' + ')];
+  const parts = [LINE(S.line).name, allCyc() ? 'Semua cycle' : S.cycs.map(cycName).join(' + ')];
   if (rangeOn()){ const f = S.okpFrom ? dlab(new Date(S.okpFrom+'T00:00:00')) : 'awal', t = S.okpTo ? dlab(new Date(S.okpTo+'T00:00:00')) : 'akhir'; parts.push('OKP '+f+' – '+t); }
   return parts.join(' · ');
 }
@@ -489,7 +524,7 @@ function groups(){
   const ps = scopePOs();
   if (S.view==='po') return ps.map(p => ({...agg('', [p]), key:p.po, l1: p.okp ? 'OKP '+dlab(p.okp) : dlab(p.dmin), l2: 'PO '+poShort(p.po), s1: (d=>d?d.getDate()+'/'+(d.getMonth()+1):'–')(p.okp||p.dmin), s2: String(p.po).slice(-4), title:`PO ${p.po} · ${p.cycle||'-'}`, sub:`OKP ${dlab(p.okp)} · ${dlab(p.dmin)}–${dlab(p.dmax)}`, po:p}));
   if (S.view==='cycle'){
-    const cs = [...new Set(ps.map(p=>p.cycle||'(tanpa cycle)'))];
+    const cs = [...new Set(ps.map(p=>p.cycle||'(tanpa cycle)'))].sort(natSort);
     return cs.map(c => { const sub = ps.filter(p=>(p.cycle||'(tanpa cycle)')===c); return {...agg('',sub), key:c, l1:c.replace('CYCLE','Cycle'), l2: sub.length+' PO', title:c, sub: sub.map(p=>poShort(p.po)).join(', ')}; });
   }
   // per hari
@@ -498,7 +533,7 @@ function groups(){
   const D = k => { if (!days.has(k)) days.set(k,{prod:0,run:0,PDT:0,UPDT:0,TRIAL:0,OFF:0,pos:new Set()}); return days.get(k); };
   for (const P of ps) for (const [a,b] of P.spans){ if (!a||!b) continue; let t=new Date(a);
     while (t<b){ const nx=new Date(t.getFullYear(),t.getMonth(),t.getDate()+1); const e2 = nx<b?nx:b; const d=D(dkey(t)); d.prod += (e2-t)/36e5; d.pos.add(P.po); t=e2; } }
-  for (const e of M.events){ if (e.po && poSet.has(e.po)){ const d=D(e.tk); d[e.tcat]=(d[e.tcat]||0)+(e.hIn??e.h); d.pos.add(e.po);} else if (!e.po && e.tcat==='OFF' && allCyc() && !rangeOn()) { D(e.tk).OFF += e.h; } }
+  for (const e of M.events){ if (e.po && poSet.has(e.po)){ const d=D(e.tk); d[e.tcat]=(d[e.tcat]||0)+(e.hIn??e.h); d.pos.add(e.po);} else if (!e.po && e.tcat==='OFF' && allCyc() && !rangeOn() && days.has(e.tk)) { D(e.tk).OFF += e.h; } }
   for (const d of days.values()) d.run = Math.max(0, d.prod - d.OFF - d.PDT - d.UPDT - d.TRIAL);
   const keys = [...days.keys()].filter(Boolean).sort();
   if (keys.length){ // isi tanggal kosong di antara
@@ -666,6 +701,7 @@ function renderDQ(){
   if (q.dup.n) items.push(`<b>${q.dup.n} baris DOWNTIME dobel</b> (tanggal, shift, jam, dan aktivitas sama; ${fh(q.dup.h)} jam) tidak dihitung ulang.`);
   if (q.outside.n) items.push(`${q.outside.n} kejadian downtime (${fh(q.outside.h)} jam) terjadi di luar Jam Mulai–Akhir OKP mana pun (mis. jeda antar OKP), jadi tidak masuk Production Hours.`);
   if (q.mapMode.time) items.push(`Kolom OKP di DOWNTIME ${q.mapMode.okp? 'baru sebagian terisi':'masih kosong'}: ${q.mapMode.time} kejadian dimasukkan ke OKP berdasarkan jam kejadian di antara Jam Mulai–Akhir START-STOP (shift 3 sebelum 07:00 dihitung hari berikutnya).`);
+  if (q.noLine.length) items.push(`<b>PO ${q.noLine.map(p=>poShort(p.po)).join(', ')} belum masuk halaman mana pun</b>: nama cycle bukan F-… / K-… dan Nama Produk tidak memuat FARMNEST / KATSU. Ganti nama cycle-nya (mis. Cycle F-1 atau Cycle K-1).`);
   if (q.abSkipped.length) items.push(`PO ${q.abSkipped.map(poShort).join(', ')} ada di DATA ABI &amp; RIAN tapi OKP-nya tidak ada di START-STOP; output-nya tidak ditampilkan.`);
   $('#dqCard').style.display = items.length? '':'none';
   $('#dq').innerHTML = `<ul>${items.map(i=>`<li>${i}</li>`).join('')}</ul>`;
@@ -675,7 +711,7 @@ function renderControls(){
   document.querySelectorAll('.cycSel').forEach(el=>{ el.innerHTML = cycHtml; el.querySelectorAll('button').forEach(b=>b.onclick=()=>{
     const c=b.dataset.c;
     if (c==='ALL') S.cycs=[];
-    else { S.cycs = S.cycs.includes(c) ? S.cycs.filter(x=>x!==c) : [...S.cycs, c].sort(); if (S.cycs.length===M.cycles.length) S.cycs=[]; }
+    else { S.cycs = S.cycs.includes(c) ? S.cycs.filter(x=>x!==c) : [...S.cycs, c].sort(natSort); if (S.cycs.length===M.cycles.length) S.cycs=[]; }
     S.sel=null; renderAll(); }); });
   $('#viewSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on', b.dataset.v===S.view));
   const okps = [...new Map(M.pos.filter(inCyc).map(p=>[okpKey(p), p])).entries()].filter(([k])=>k).sort((a,b)=>a[0].localeCompare(b[0]));
@@ -683,8 +719,11 @@ function renderControls(){
   if (S.okpFrom && !okps.some(o=>o[0]===S.okpFrom)) S.okpFrom=''; if (S.okpTo && !okps.some(o=>o[0]===S.okpTo)) S.okpTo='';
   $('#okpFrom').innerHTML = opt(S.okpFrom,'awal'); $('#okpTo').innerHTML = opt(S.okpTo,'akhir');
   $('#okpReset').style.visibility = rangeOn() ? 'visible':'hidden';
-  for (const [id,k] of [['capCavity','cavity'],['capCycle','cycle'],['capForming','forming'],['capPickup','pickup'],['capYield','yield']]) if (document.activeElement!==$('#'+id)) $('#'+id).value = S.cap[k];
-  const cc = capCalc(); $('#capOut').innerHTML = `${NF0.format(cc.nett)} kg/jam <small>(FG ${NF2.format(cc.fg)} g · ${NF2.format(cc.perMin)} kg/mnt · teoritis ${NF0.format(cc.perHour)} kg/jam × yield ${NF1.format(S.cap.yield)}%)</small>`;
+  for (const [id,k] of [['capCavity','cavity'],['capCycle','cycle'],['capForming','forming'],['capPickup','pickup'],['capYield','yield']]) if (document.activeElement!==$('#'+id)) $('#'+id).value = S.cap[k] ?? '';
+  $('#capLine').textContent = LINE(S.line).name;
+  const cc = capCalc(); $('#capOut').innerHTML = cc.ok
+    ? `${NF0.format(cc.nett)} kg/jam <small>(FG ${NF2.format(cc.fg)} g · ${NF2.format(cc.perMin)} kg/mnt · teoritis ${NF0.format(cc.perHour)} kg/jam × yield ${NF1.format(S.cap.yield)}%)</small>`
+    : `<span class="capWarn">Isi kapasitas ${esc(LINE(S.line).name)} dulu — Performance &amp; OEE kosong</span>`;
   $('#selNote').innerHTML = S.sel && S.view==='po' ? `Dipilih: <b>PO ${S.sel}</b> · <a id="clrSel">hapus pilihan</a>` : '';
   const c = $('#clrSel'); if (c) c.onclick = ()=>{ S.sel=null; renderAll(); };
 }
@@ -702,7 +741,7 @@ function oee(a){
 function oeeGroups(){
   const ps = scopePOs();
   if (S.oview==='cycle'){
-    const cs = [...new Set(ps.map(p=>p.cycle||'(tanpa cycle)'))];
+    const cs = [...new Set(ps.map(p=>p.cycle||'(tanpa cycle)'))].sort(natSort);
     return cs.map(c => { const sub = ps.filter(p=>(p.cycle||'(tanpa cycle)')===c); const a=agg('',sub); return {a, o:oee(a), key:c, l1:cycName(c), l2: sub.length+' PO', title:cycName(c), sub: 'PO '+sub.map(p=>poShort(p.po)).join(', ')}; });
   }
   return ps.map(p => { const a=agg('',[p]); return {a, o:oee(a), key:p.po, l1: p.okp ? 'OKP '+dlab(p.okp) : dlab(p.dmin), l2:'PO '+poShort(p.po), s1:(d=>d?d.getDate()+'/'+(d.getMonth()+1):'–')(p.okp||p.dmin), s2:poShort(p.po), title:`PO ${p.po} · ${cycName(p.cycle||'-')}`, sub:`OKP ${dlab(p.okp)} · ${dlab(p.dmin)}–${dlab(p.dmax)}`}; });
@@ -830,9 +869,8 @@ async function load(){
   $('#loadedAt').textContent = 'Memuat data…';
   try{
     const [ss, dt, ab, teco] = await Promise.all([loadTab('ss'), loadTab('dt'), loadTab('ab'), loadTab('teco')]);
-    M = build(ss, dt, ab, teco);
-    const now = new Date(); $('#loadedAt').textContent = `Data dimuat ${pad(now.getHours())}:${pad(now.getMinutes())} · ${M.pos.length} PO · ${M.events.length} event DT`;
-    renderAll();
+    MALL = build(ss, dt, ab, teco); MALL.at = new Date();
+    applyLine();
   }catch(err){
     console.error(err);
     $('#loadedAt').innerHTML = '<span class="err">Gagal memuat</span>';
@@ -840,12 +878,38 @@ async function load(){
   }
 }
 $('#refresh').onclick = load;
+function renderLineNav(){
+  $('#lineNav').innerHTML = CFG.lines.map(l=>`<button data-line="${l.key}" class="${l.key===S.line?'on':''}">${esc(l.name)}${MALL?` <small style="opacity:.7">${MALL.pos.filter(p=>p.line===l.key).length}</small>`:''}</button>`).join('');
+  $('#lineNav').querySelectorAll('button').forEach(b=>b.onclick=()=>setLine(b.dataset.line));
+}
+function applyLine(){
+  const L = LINE(S.line);
+  S.cap = S.caps[S.line]; S.theo = capCalc().nett;
+  document.title = 'Dashboard Nugget · ' + L.name;
+  renderLineNav();
+  if (!MALL) return;
+  M = viewOf(MALL, S.line);
+  const nl = MALL.dq.noLine; $('#lineWarn').style.display = nl.length ? '' : 'none';
+  $('#lineWarn').innerHTML = nl.length ? `⚠ ${nl.length} PO belum masuk halaman Farmnest / Katsu Eco: ${nl.map(p=>`PO ${poShort(p.po)} (${esc(cycName(p.cycle||'tanpa cycle'))})`).join(', ')}. Ganti nama cycle-nya jadi Cycle F-… atau Cycle K-….` : '';
+  const n = MALL.at; $('#loadedAt').textContent = `Data dimuat ${pad(n.getHours())}:${pad(n.getMinutes())} · ${L.name}: ${M.pos.length} PO · ${M.events.filter(e=>e.po).length} event DT`;
+  renderAll();
+}
+function setLine(k){
+  if (k===S.line) return;
+  S.line = k; S.cycs=[]; S.sel=null; S.okpFrom=''; S.okpTo='';
+  try{ localStorage.setItem('nugget_line', k); }catch(e){}
+  history.replaceState(null, '', '#'+LINE(k).slug);
+  applyLine();
+}
+if (!lineFromHash()) try{ history.replaceState(null,'','#'+LINE(S.line).slug); }catch(e){}
+addEventListener('hashchange', ()=>{ const k = lineFromHash(); if (k && k!==S.line) setLine(k); });
+renderLineNav();
 $('#okpFrom').onchange = e => { S.okpFrom = e.target.value; if (S.okpTo && S.okpFrom && S.okpFrom > S.okpTo) S.okpTo = S.okpFrom; S.sel=null; renderAll(); };
 $('#okpTo').onchange = e => { S.okpTo = e.target.value; if (S.okpFrom && S.okpTo && S.okpTo < S.okpFrom) S.okpFrom = S.okpTo; S.sel=null; renderAll(); };
 $('#okpReset').onclick = () => { S.okpFrom=''; S.okpTo=''; renderAll(); };
 for (const [id,k] of [['capCavity','cavity'],['capCycle','cycle'],['capForming','forming'],['capPickup','pickup'],['capYield','yield']])
   $('#'+id).oninput = e => { const v = parseFloat(e.target.value); if (!(v>=0) || (k!=='pickup' && !(v>0))) return; S.cap[k]=v; S.theo = capCalc().nett;
-    try{ localStorage.setItem('nugget_cap', JSON.stringify(S.cap)); }catch(_){}
+    try{ localStorage.setItem('nugget_cap_'+S.line, JSON.stringify(S.cap)); }catch(_){}
     if (M) renderAll(); };
 
 /* ============ DOWNLOAD PNG ============ */
@@ -856,7 +920,7 @@ function loadH2C(){
   return h2cP;
 }
 function fileName(base){
-  const vw = base.startsWith('OEE') ? S.oview : S.view; const parts = [base, vw==='po'?'PerPO':vw==='cycle'?'PerCycle':'PerHari', allCyc()?'Semua':S.cycs.map(c=>c.replace(/\s+/g,'')).join('-')];
+  const vw = base.startsWith('OEE') ? S.oview : S.view; const parts = [base, LINE(S.line).name.replace(/\s+/g,''), vw==='po'?'PerPO':vw==='cycle'?'PerCycle':'PerHari', allCyc()?'Semua':S.cycs.map(c=>c.replace(/\s+/g,'')).join('-')];
   if (S.okpFrom || S.okpTo) parts.push('OKP_'+(S.okpFrom||'awal')+'_sd_'+(S.okpTo||'akhir'));
   if (S.sel) parts.push('PO'+S.sel);
   const d=new Date(); parts.push(d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate()));
