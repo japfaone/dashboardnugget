@@ -270,7 +270,7 @@ const CFG = {
     { key:'F', slug:'farmnest',  name:'Farmnest',  cycRe:/(^|[\s-])F\s*-?\s*\d/i, prodRe:/FARMNEST/i,
       cap:{ cavity:10, cycle:25, forming:14.45, pickup:36.15, yield:71 } },
     { key:'K', slug:'katsu-eco', name:'Katsu Eco', cycRe:/(^|[\s-])K\s*-?\s*\d/i, prodRe:/KATSU/i,
-      cap:{ cavity:null, cycle:null, forming:null, pickup:null, yield:null } }   // belum ada angka default -> isi di dashboard
+      cap:{ cavity:5, cycle:10, forming:90.97, pickup:24.26, yield:63 } }   // LINE NUGGET CAPACITY: FG 113,04 g · 339 kg/jam teoritis · 214 kg/jam nett
   ],
   sheetId: '1Trc9IJGQGj36Zs0RpHFh0eh21fEY9MJ_6Nk8FzXKPzo',
   // Tab dibaca berdasarkan NAMA tab (name). gid hanya cadangan kalau nama tab diubah.
@@ -567,22 +567,25 @@ function niceMax(v, steps){ if (!(v>0)) return steps; const raw=v/steps; const p
 function renderChart(){
   const box = $('#chartBox'); const G = groups();
   if (!G.length){ box.innerHTML = '<div class="empty">Tidak ada data untuk filter ini.</div>'; $('#legend').innerHTML=''; return; }
-  const W = Math.max(320, box.clientWidth); const H = 350;
   const showLine = S.view!=='day' && G.some(g=>g.kg1>0);
-  const mL=42, mR= showLine? 56:14, mT=40, mB=62;
+  const W = Math.max(320, box.clientWidth); const H = showLine ? 400 : 350;
+  const mL=42, mR=14, mT= showLine ? 48 : 40, mB=62;
   const pw = W-mL-mR, ph = H-mT-mB;
+  // Garis output punya jalur sendiri DI ATAS batang (tidak menimpa batang): batang di 60% bawah, garis di 40% atas
+  const phB = showLine ? ph*0.60 : ph, barTop = mT + ph - phB;
   const maxT = Math.max(...G.map(g=>g.total));
-  const yMax = S.view==='day' ? Math.max(24, niceMax(maxT,4)) : niceMax(maxT*(showLine?1.45:1.05),4);
-  const ySteps = 4; const yS = v => mT + ph - v/yMax*ph;
-  const kMax = showLine ? niceMax(Math.max(...G.map(g=>g.kg1||0)),2) : 1; const yK = v => mT + ph - v/kMax*ph;
+  const yMax = S.view==='day' ? Math.max(24, niceMax(maxT,4)) : niceMax(maxT*1.05,4);
+  const ySteps = 4; const yS = v => mT + ph - v/yMax*phB;
+  const kMax = showLine ? Math.max(...G.map(g=>g.kg1||0)) : 1, kMin = showLine ? Math.min(...G.filter(g=>g.kg1>0).map(g=>g.kg1)) : 0;
+  const lnTop = mT + 6, lnBot = barTop - 36;   // titik garis berada di antara lnTop..lnBot
+  const yK = v => lnBot - (kMax>0 ? v/kMax : 0)*(lnBot-lnTop);
   const band = pw/G.length; const bw = Math.max(8, Math.min(64, band*0.74));
   const cx = i => mL + band*i + band/2;
   const css = getComputedStyle(document.documentElement); const C = n => css.getPropertyValue(n).trim();
   let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Grafik uptime">`;
   for (let i=0;i<=ySteps;i++){ const v=yMax/ySteps*i, y=yS(v);
     s += `<line x1="${mL}" x2="${W-mR}" y1="${y}" y2="${y}" stroke="${C('--grid')}" stroke-width="1"/>`;
-    s += `<text x="${mL-8}" y="${y+4}" text-anchor="end" font-size="11.5" fill="${C('--muted')}">${NF0.format(v)}j</text>`;
-    if (showLine) s += `<text x="${W-mR+8}" y="${y+4}" font-size="11.5" fill="${C('--muted')}">${NF1.format(kMax/ySteps*i/1000)}t</text>`;
+    s += `<text x="${mL-8}" y="${y+4}" text-anchor="end" font-size="11.5" fill="${C('--muted')}">${Number.isInteger(+v.toFixed(6))?NF0.format(v):NF1.format(v)}j</text>`;
   }
   const segs = [['run','--run'],['PDT','--pdt'],['UPDT','--updt'],['TRIAL','--trial'],['OFF','--off']];
   G.forEach((g,i)=>{
@@ -616,11 +619,20 @@ function renderChart(){
       const d = pts.map((p,i)=>(i?'L':'M')+p[0]+','+p[1]).join(' ');
       s += `<path d="${d}" fill="none" stroke="${C('--lineEdge')}" stroke-width="6" stroke-linejoin="round" stroke-linecap="round" opacity=".9"/>`;
       s += `<path d="${d}" fill="none" stroke="${C('--lineStroke')}" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>`;
-      pts.forEach(([x,y,g])=>{
+      // label: pill ton + kg/jam. Kolom sempit -> kg/jam dipindah ke bawah titik; sangat sempit -> hanya pill (detail di tooltip)
+      const wide = band >= 84, mid = band >= 46;
+      const halo = `stroke="${C('--card')}" stroke-width="4" paint-order="stroke" stroke-linejoin="round"`;
+      pts.forEach(([x,y,g],i)=>{
         s += `<circle cx="${x}" cy="${y}" r="5.5" fill="${C('--lineStroke')}" stroke="${C('--lineEdge')}" stroke-width="2.5"/>`;
-        const t = ft(g.kg1); const tw = t.length*7+16; let py = y-26; if (py<20) py = y+12;
-        s += `<rect x="${x-tw/2}" y="${py}" width="${tw}" height="20" rx="10" fill="${C('--pill')}"/><text x="${x}" y="${py+14}" text-anchor="middle" font-size="11.5" font-weight="700" fill="${C('--pillInk')}">${t}</text>`;
-        if (g.run>0){ const kh = NF0.format(g.kg1/g.run)+' kg/jam'; s += `<text x="${x}" y="${py-5}" text-anchor="middle" font-size="11" font-weight="700" fill="${C('--ink2')}">${kh}</text>`; }
+        const kh = g.run>0 ? NF0.format(g.kg1/g.run)+' kg/jam' : '';
+        const t = ft(g.kg1);
+        if (mid){
+          const tw = t.length*7+16, py = y-30;
+          s += `<rect x="${x-tw/2}" y="${py}" width="${tw}" height="20" rx="10" fill="${C('--pill')}"/><text x="${x}" y="${py+14}" text-anchor="middle" font-size="11.5" font-weight="700" fill="${C('--pillInk')}">${t}</text>`;
+          if (kh && wide) s += `<text x="${x}" y="${y+20}" text-anchor="middle" font-size="11.5" font-weight="700" fill="${C('--ink2')}" ${halo}>${kh}</text>`;
+          else if (kh && i%2===0) s += `<text x="${x}" y="${y+20}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${C('--ink2')}" ${halo}>${NF0.format(g.kg1/g.run)}</text>`;
+          else if (kh) s += `<text x="${x}" y="${y+32}" text-anchor="middle" font-size="10.5" font-weight="700" fill="${C('--ink2')}" ${halo}>${NF0.format(g.kg1/g.run)}</text>`;
+        }
       });
     }
   }
@@ -652,7 +664,7 @@ function renderChart(){
       else if (S.view==='cycle'){ S.cycs = M.cycles.includes(g.key)?[g.key]:[]; S.view='po'; S.sel=null; renderAll(); }
     });
   });
-  $('#legend').innerHTML = `<span><i style="background:var(--run)"></i>Uptime (jam)</span><span><i style="background:var(--pdt)"></i>Planned DT</span><span><i style="background:var(--updt)"></i>Unplanned DT</span>${G.some(g=>g.TRIAL>0)?'<span><i style="background:var(--trial)"></i>Trial</span>':''}${G.some(g=>g.OFF>0)?'<span><i style="background:var(--off)"></i>OFF / No Schedule</span>':''}${showLine?'<span><i class="ln"></i>Output 1st (kg, sumbu kanan · t = ton)</span>':''}`;
+  $('#legend').innerHTML = `<span><i style="background:var(--run)"></i>Uptime (jam)</span><span><i style="background:var(--pdt)"></i>Planned DT</span><span><i style="background:var(--updt)"></i>Unplanned DT</span>${G.some(g=>g.TRIAL>0)?'<span><i style="background:var(--trial)"></i>Trial</span>':''}${G.some(g=>g.OFF>0)?'<span><i style="background:var(--off)"></i>OFF / No Schedule</span>':''}${showLine?'<span><i class="ln"></i>Output 1st (label gelap = ton · angka = kg/jam uptime)</span>':''}`;
 }
 
 /* ============ RENDER: PARETO, KOMPOSISI, TABEL, LOG ============ */
